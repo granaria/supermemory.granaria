@@ -74,6 +74,67 @@ async def list_tools() -> list[Tool]:
             description="Zeigt Benutzerinfo basierend auf Memories",
             inputSchema={"type": "object", "properties": {}}
         ),
+        Tool(
+            name="rechunk",
+            description=(
+                "Migriere alle bestehenden Memories ins neue Chunk-Schema "
+                "(Sentence-Chunking + Metadata). Sicher, idempotent, auch "
+                "Legacy-Einträge werden neu gechunkt. project: optional "
+                "(ohne → alle Projekte). Kann bei vielen Memories einige "
+                "Sekunden dauern, weil jede neu embedded wird."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "maxLength": 128}
+                }
+            }
+        ),
+        Tool(
+            name="recall_multi",
+            description=(
+                "Multi-Query Recall: Ollama paraphrasiert die Anfrage in "
+                "mehrere Varianten, recallt alle parallel, dedupliziert "
+                "pro Memory-ID mit bestem Score. Robuster bei Synonymen "
+                "und mehrdeutigen Fragen als normales recall, aber langsamer "
+                "(Query-Expansion braucht 2–10s)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "maxLength": 1000},
+                    "project": {"type": "string", "maxLength": 128},
+                    "n_results": {"type": "integer", "default": 15},
+                    "expand_n": {
+                        "type": "integer", "default": 3, "minimum": 0,
+                        "maximum": 8,
+                        "description": "Anzahl Paraphrasen (0 = wie recall)"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="answer",
+            description=(
+                "Beantwortet eine Frage auf Basis der Memories (RAG). "
+                "Kombiniert Multi-Query Recall, v2-Context-Score-Prompt "
+                "und Ollama. Liefert Begründung (justification) + Antwort "
+                "+ Quellenliste. Bei Ollama-Offline: Fallback auf reines "
+                "Retrieval ohne LLM-Synthese."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "maxLength": 1000},
+                    "project": {"type": "string", "maxLength": 128},
+                    "n_context": {"type": "integer", "default": 8,
+                                  "minimum": 1, "maximum": 20},
+                    "use_multi_query": {"type": "boolean", "default": True}
+                },
+                "required": ["question"]
+            }
+        ),
 
         # ── Knowledge Graph Tools (v2) ───────────────────────
         Tool(
@@ -274,6 +335,108 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
             profile = await get_engine().generate(mems)
             return [TextContent(type="text", text=f"## Benutzer-Info\n{profile}")]
         return [TextContent(type="text", text="Keine Memories vorhanden.")]
+
+    elif name == "rechunk":
+        project = args.get("project")
+        r = store.rechunk_all(project=project)
+        if r.get("error"):
+            return [TextContent(type="text", text=f"⚠️ {r['error']}")]
+        return [TextContent(
+            type="text",
+            text=(
+                f"✅ {r['migrated']} Memories neu gechunkt "
+                f"(Projekte: {r['projects']}, Provider: {r['provider']})"
+            )
+        )]
+
+    elif name == "recall_multi":
+        from .rag import recall_multi as _recall_multi
+        query = args.get("query", "")
+        project = args.get("project", "default")
+        n = args.get("n_results", 15)
+        expand_n = args.get("expand_n", 3)
+        if not query:
+            return [TextContent(type="text", text="Fehler: query erforderlich")]
+
+        result = await _recall_multi(store, query, project, n, expand_n)
+        mems = result["memories"]
+        queries = result["queries"]
+
+        parts = []
+        if len(queries) > 1:
+            parts.append("## Verwendete Queries")
+            for i, q in enumerate(queries, 1):
+                marker = " *(original)*" if i == 1 else ""
+                parts.append(f"{i}. {q}{marker}")
+            parts.append("")
+
+        parts.append("## Relevante Memories")
+        if mems:
+            for i, m in enumerate(mems, 1):
+                score_line = f"sim {m['similarity']}%"
+                if "normalised_score" in m:
+                    score_line += f" · rel {m['normalised_score']}/100"
+                if m.get("matched_query") and m["matched_query"] != queries[0]:
+                    mq = m["matched_query"][:60]
+                    score_line += f' · via "{mq}"'
+                header = f"### {i}. [{score_line}]"
+                if m.get("title"):
+                    header += f" · **{m['title']}**"
+                parts.append(header)
+                parts.append(m["content"])
+                if m.get("matched_chunk") and m.get("chunk_count", 1) > 1:
+                    idx = m.get("matched_chunk_index", "?")
+                    parts.append(
+                        f"\n> *Bester Match: Chunk {idx}/{m['chunk_count']}*"
+                    )
+                parts.append("")
+        else:
+            parts.append("Keine gefunden.")
+
+        return [TextContent(type="text", text="\n".join(parts))]
+
+    elif name == "answer":
+        from .rag import recall_multi as _recall_multi, get_rag_engine
+        question = args.get("question", "")
+        project = args.get("project", "default")
+        n = args.get("n_context", 8)
+        use_mq = args.get("use_multi_query", True)
+        if not question:
+            return [TextContent(type="text", text="Fehler: question erforderlich")]
+
+        # Retrieval
+        if use_mq:
+            r = await _recall_multi(store, question, project, n)
+            memories = r["memories"]
+            queries = r["queries"]
+        else:
+            memories = store.recall(question, project, n)
+            queries = [question]
+
+        # RAG-Antwort
+        rag_result = await get_rag_engine().answer(question, memories)
+
+        parts = [
+            f"## Antwort\n{rag_result['answer']}",
+            f"\n## Begründung\n{rag_result['justification']}",
+        ]
+
+        if len(queries) > 1:
+            parts.append("\n## Query-Expansion")
+            for q in queries:
+                parts.append(f"- {q}")
+
+        if memories:
+            parts.append(f"\n## Quellen ({len(memories)} Memories)")
+            for i, m in enumerate(memories, 1):
+                label = m.get("title") or m["id"]
+                parts.append(
+                    f"{i}. [{m.get('similarity', 0)}% / "
+                    f"rel {m.get('normalised_score', 0)}] {label}"
+                )
+
+        parts.append(f"\n_Provider: {rag_result.get('provider', '?')}_")
+        return [TextContent(type="text", text="\n".join(parts))]
 
     # ── Knowledge Graph Tools ────────────────────────────────
     elif name == "graph_add_entity":
