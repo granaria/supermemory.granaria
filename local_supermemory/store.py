@@ -443,22 +443,31 @@ class MemoryStore:
             "errors": errors
         }
 
-    def migrate_embeddings(self, project: str = None) -> dict:
-        """Re-embed alle Memories mit aktuellem Embedding-Provider + Chunking."""
-        if not self._use_ollama:
-            return {"error": "Ollama nicht verfügbar — Migration nicht möglich"}
+    def rechunk_all(self, project: str = None) -> dict:
+        """Alle Memories neu chunken + neu embedden mit aktuellem Provider.
 
+        Zweck: Legacy-Single-Entries (ohne chunk_index/memory_id metadata)
+        ins neue Chunk-Schema bringen. Funktioniert mit jedem Embedding-
+        Provider (Ollama wenn verfügbar, sonst ChromaDB-Default).
+
+        Strategie: pro Projekt die Collection droppen und mit save()
+        für jede Memory neu aufbauen. save() übernimmt Chunking,
+        Metadata und Idempotenz. Graph-Extraktion wird übersprungen
+        (separates rebuild_graph() verfügbar).
+        """
         if project:
             projects = [project]
         else:
             projects = [p["name"] for p in self.list_projects()]
 
         total = 0
+        errors = 0
         for proj in projects:
             memories = self.get_all(proj)
             if not memories:
                 continue
 
+            # Collection droppen — die wird von save() neu angelegt
             name = f"memories_{proj.replace('-', '_')}"
             try:
                 self.chroma.delete_collection(name)
@@ -466,34 +475,41 @@ class MemoryStore:
                 pass
 
             for mem in memories:
-                # Nutze save()-Logik für Chunking + Metadata-Konsistenz,
-                # aber ohne Graph-Re-Extraktion (zu teuer, passiert separat)
-                meta = {}
                 try:
+                    meta = {}
                     if mem.get("metadata"):
-                        meta = json.loads(mem["metadata"])
+                        try:
+                            meta = json.loads(mem["metadata"])
+                        except Exception:
+                            pass
+                    self.save(
+                        mem["content"], proj,
+                        title=meta.get("title"),
+                        source_url=meta.get("source_url"),
+                        description=meta.get("description"),
+                        auto_extract=False,
+                    )
+                    total += 1
                 except Exception:
-                    pass
-                self.save(
-                    mem["content"], proj,
-                    title=meta.get("title"),
-                    source_url=meta.get("source_url"),
-                    description=meta.get("description"),
-                    auto_extract=False,
-                )
-                total += 1
+                    errors += 1
 
-        return {"migrated": total, "projects": len(projects),
-                "provider": self.embedding_info}
+        result = {
+            "migrated": total,
+            "projects": len(projects),
+            "provider": self.embedding_info,
+        }
+        if errors:
+            result["errors"] = errors
+        return result
 
-    def rechunk_all(self, project: str = None) -> dict:
-        """Alle bestehenden Memories neu chunken (auch Legacy-Single-Entries).
+    def migrate_embeddings(self, project: str = None) -> dict:
+        """Alias auf rechunk_all — gleicher Effekt.
 
-        Identisch zu migrate_embeddings(), aber mit explizitem Namen für
-        semantische Klarheit. Nutze, um Legacy-Einträge in das neue
-        Chunk-Schema zu migrieren.
+        Historisch separates Konzept (Embedding-Provider-Wechsel), aber
+        technisch identisch zur Chunk-Migration. Alias bleibt für
+        Rückwärtskompatibilität von Python-API-Callern.
         """
-        return self.migrate_embeddings(project)
+        return self.rechunk_all(project)
 
     def stats(self) -> dict:
         conn = sqlite3.connect(self.db_path)
