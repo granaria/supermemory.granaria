@@ -8,9 +8,9 @@ from mcp.types import Tool, TextContent
 from .store import MemoryStore
 from .profile import get_engine
 
-# ── Phase 1: Privacy filter + progressive recall ────────────────
-from phase1.hooks.privacy_filter import filter_content
+# ── Phase 1: Privacy filter + progressive recall + dashboard ────
 from phase1.tools.recall_progressive import build_index, fetch_by_ids
+from phase1.dashboard.integration import apply_save_policy
 
 server = Server("local-supermemory")
 store = MemoryStore()
@@ -278,44 +278,26 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
         if not content:
             return [TextContent(type="text", text="Fehler: content erforderlich")]
         if action == "save":
-            # Phase 1: Privacy-Filter auf content + metadata-Felder.
-            # User könnte sonst Credentials via title/description/source_url
-            # in Metadata einschleusen (die ungefiltert nach Chroma gehen).
-            _fields = {
-                "content": content,
-                "title": args.get("title") or "",
-                "description": args.get("description") or "",
-                "source_url": args.get("source_url") or "",
-            }
-            _filtered = {k: filter_content(v) for k, v in _fields.items()}
-
-            # Jede rejection bricht den save (unclosed tag irgendwo im payload)
-            for fname, fres in _filtered.items():
-                if fres.rejected:
-                    return [TextContent(type="text",
-                        text=f"⚠️ [{fname}] {fres.rejection_reason}")]
-
-            # Summaries sammeln für das Privacy-Badge in der Response
-            _summary_bits = [
-                f"{fname}: {fres.summary()}"
-                for fname, fres in _filtered.items()
-                if fres.had_secrets
-            ]
-            privacy_summary = (
-                f" · 🔒 " + "; ".join(_summary_bits) if _summary_bits else ""
+            # Phase 1: Dashboard-driven save policy — project blocklist,
+            # size limit, privacy filter on all persisted fields.
+            policy = apply_save_policy(
+                content=content,
+                project=project,
+                title=args.get("title"),
+                description=args.get("description"),
+                source_url=args.get("source_url"),
             )
-
-            content = _filtered["content"].content
-            title = _filtered["title"].content or None
-            description = _filtered["description"].content or None
-            source_url = _filtered["source_url"].content or None
+            if policy.rejected:
+                return [TextContent(type="text",
+                    text=f"⚠️ {policy.rejection_reason}")]
 
             r = store.save(
-                content, project,
-                title=title,
-                source_url=source_url,
-                description=description,
+                policy.content, project,
+                title=policy.title,
+                source_url=policy.source_url,
+                description=policy.description,
                 language=args.get("language", "auto"),
+                auto_extract=policy.auto_extract_graph,
             )
             if r.get("error"):
                 return [TextContent(type="text", text=f"⚠️ {r['error']}")]
@@ -327,7 +309,7 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
                     graph_info = f", {g.get('entities', 0)} Entitäten, {g.get('relations', 0)} Relationen"
             return [TextContent(
                 type="text",
-                text=f"✅ Gespeichert (ID: {r['id']}, Projekt: {r['project']}{chunks_info}{graph_info}){privacy_summary}"
+                text=f"✅ Gespeichert (ID: {r['id']}, Projekt: {r['project']}{chunks_info}{graph_info}){policy.badge}"
             )]
         else:
             r = store.forget(content, project)

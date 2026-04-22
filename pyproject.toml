@@ -13,6 +13,12 @@ dependencies = [
 
 [project.scripts]
 local-supermemory = "local_supermemory.server:main"
+granaria-dashboard = "phase1.dashboard.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["local_supermemory", "phase1"]
+# Ensure the dashboard HTML ships with the wheel
+artifacts = ["phase1/dashboard/index.html"]
 
 [build-system]
 requires = ["hatchling"]

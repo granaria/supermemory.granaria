@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>supermemory.granaria — Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1c232c;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; max-width: 1040px; margin: 0 auto;
+    background: var(--bg); color: var(--text); font-family: var(--font);
+    font-size: 14px; line-height: 1.45;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; color: var(--accent); }
+  header { margin-bottom: 24px; }
+  header .subtitle { color: var(--muted); font-size: 13px; }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 780px) { .panels { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .panel.full { grid-column: 1 / -1; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+  .row + .row { border-top: 1px dashed var(--border); }
+  .row label { flex: 1; cursor: pointer; }
+  .row .hint { color: var(--muted); font-size: 12px; display: block; margin-top: 2px; }
+  input[type=text], input[type=number], select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font-family: var(--mono); font-size: 13px;
+    width: 100%;
+  }
+  .inline { display: inline-block; width: auto; min-width: 120px; }
+  button {
+    background: var(--accent); color: #0d1117; border: none; border-radius: 6px;
+    padding: 8px 14px; font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  button.danger { background: transparent; color: var(--err); border: 1px solid var(--err); }
+  .switch {
+    position: relative; display: inline-block; width: 36px; height: 20px;
+    flex: 0 0 36px;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; background: var(--border); transition: .2s;
+    border-radius: 20px; cursor: pointer;
+  }
+  .slider:before {
+    content: ""; position: absolute; height: 14px; width: 14px;
+    left: 3px; bottom: 3px; background: #fff; transition: .2s; border-radius: 50%;
+  }
+  .switch input:checked + .slider { background: var(--ok); }
+  .switch input:checked + .slider:before { transform: translateX(16px); }
+  .stat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 16px; }
+  .stat-grid .k { color: var(--muted); }
+  .stat-grid .v { font-family: var(--mono); }
+  #status {
+    position: fixed; bottom: 20px; right: 20px; padding: 8px 16px;
+    border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity .3s;
+    pointer-events: none; z-index: 100;
+  }
+  #status.show { opacity: 1; }
+  #status.ok { background: var(--ok); color: #0d1117; }
+  #status.err { background: var(--err); color: #fff; }
+  .toolbar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .project-chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 12px;
+    font-family: var(--mono); font-size: 12px; margin: 2px 4px 2px 0;
+  }
+  .project-chip button {
+    background: transparent; color: var(--err); border: none; padding: 0 2px;
+    font-weight: bold; cursor: pointer;
+  }
+  .events { max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: 12px; }
+  .events .ev { padding: 4px 0; border-top: 1px dashed var(--border); }
+  .events .ev:first-child { border-top: none; }
+  .events .ev .ts { color: var(--muted); margin-right: 8px; }
+  .events .ev .ev-name { display: inline-block; min-width: 180px; }
+  .ev-save_ok { color: var(--ok); }
+  .ev-save_blocked_project, .ev-save_rejected_too_large, .ev-save_rejected_unclosed_tag { color: var(--err); }
+  .ev-config_updated { color: var(--accent); }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>supermemory.granaria — Dashboard</h1>
+  <div class="subtitle">Konfiguriere was gespeichert wird. Änderungen werden live vom MCP-Server übernommen.</div>
+</header>
+
+<div class="panels">
+
+  <!-- ── Privacy ── -->
+  <section class="panel">
+    <h2>Privacy-Filter</h2>
+    <div class="row">
+      <label for="p_enabled"><b>Filter global aktiv</b><span class="hint">Bei Off: keine Filterung — nichts wird gestrippt oder redigiert.</span></label>
+      <span class="switch"><input type="checkbox" id="p_enabled"/><span class="slider"></span></span>
+    </div>
+    <div class="row">
+      <label for="p_strip"><b>Tier 1: &lt;private&gt; / &lt;secret&gt; strippen</b><span class="hint">Hard-entfernt vor der Persistierung.</span></label>
+      <span class="switch"><input type="checkbox" id="p_strip"/><span class="slider"></span></span>
+    </div>
+    <div class="row">
+      <label for="p_strict"><b>Strict: offene Tags ablehnen</b><span class="hint">Unclosed <code>&lt;private&gt;</code> → Save-Reject (statt Best-Effort).</span></label>
+      <span class="switch"><input type="checkbox" id="p_strict"/><span class="slider"></span></span>
+    </div>
+  </section>
+
+  <!-- ── Patterns ── -->
+  <section class="panel">
+    <h2>Tier 2: Credential-Patterns</h2>
+    <div id="patterns"></div>
+  </section>
+
+  <!-- ── Capture ── -->
+  <section class="panel">
+    <h2>Capture-Regeln</h2>
+    <div class="row">
+      <label for="c_max"><b>Max Content-Länge</b><span class="hint">0 = unbegrenzt. Längere Saves werden abgelehnt.</span></label>
+      <input type="number" id="c_max" class="inline" min="0" step="1000"/>
+    </div>
+    <div class="row">
+      <label for="c_auto"><b>Knowledge-Graph Auto-Extract</b><span class="hint">Entitäten + Relationen bei jedem Save erkennen.</span></label>
+      <span class="switch"><input type="checkbox" id="c_auto"/><span class="slider"></span></span>
+    </div>
+    <div class="row">
+      <label for="c_lang"><b>Default-Sprache (Chunking)</b></label>
+      <select id="c_lang" class="inline">
+        <option value="auto">auto</option>
+        <option value="de">de</option>
+        <option value="en">en</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- ── Blocklist ── -->
+  <section class="panel">
+    <h2>Projekt-Blocklist</h2>
+    <div class="hint" style="color:var(--muted); margin-bottom: 8px;">Saves in diese Projekte werden abgelehnt.</div>
+    <div id="blockchips"></div>
+    <div class="row">
+      <select id="projectSelect" class="inline" style="min-width: 180px;"></select>
+      <button type="button" class="ghost" id="blockAdd">+ blocken</button>
+    </div>
+  </section>
+
+  <!-- ── Stats ── -->
+  <section class="panel">
+    <h2>Speicher-Stats</h2>
+    <div class="stat-grid" id="stats">
+      <div class="k">Memories</div><div class="v" id="s_mems">…</div>
+      <div class="k">Chunks</div><div class="v" id="s_chunks">…</div>
+      <div class="k">Projekte</div><div class="v" id="s_projs">…</div>
+      <div class="k">Embedding</div><div class="v" id="s_embed">…</div>
+      <div class="k">Graph Entitäten</div><div class="v" id="s_ge">…</div>
+      <div class="k">Graph Relationen</div><div class="v" id="s_gr">…</div>
+      <div class="k">Pfad</div><div class="v" id="s_path">…</div>
+    </div>
+  </section>
+
+  <!-- ── Recent events ── -->
+  <section class="panel full">
+    <h2>Letzte Filter-Events</h2>
+    <div class="events" id="events"></div>
+  </section>
+
+</div>
+
+<div class="toolbar">
+  <button class="ghost" id="reload">Neu laden</button>
+  <button id="save">Speichern</button>
+</div>
+
+<div id="status"></div>
+
+<script>
+  const PATTERN_LABELS = {
+    aws_access_key: "AWS Access Key (AKIA…, ASIA…)",
+    stripe_live_key: "Stripe Live Secret (sk_live_…)",
+    stripe_test_key: "Stripe Test Secret (sk_test_…)",
+    github_pat: "GitHub PAT (ghp_…)",
+    github_oauth: "GitHub OAuth (gho_…)",
+    openai_key: "OpenAI API Key (legacy)",
+    anthropic_key: "Anthropic API Key (sk-ant-…)",
+    jwt: "JSON Web Token",
+    private_key_pem: "PEM Private Key",
+  };
+
+  let currentConfig = null;
+  let allProjects = [];
+
+  const $ = s => document.querySelector(s);
+  const show = (msg, kind='ok') => {
+    const s = $('#status');
+    s.textContent = msg; s.className = `show ${kind}`;
+    setTimeout(() => s.classList.remove('show'), 2200);
+  };
+
+  async function load() {
+    const [cfg, stats, projs, events] = await Promise.all([
+      fetch('/api/config').then(r => r.json()),
+      fetch('/api/stats').then(r => r.json()),
+      fetch('/api/projects').then(r => r.json()),
+      fetch('/api/audit?n=30').then(r => r.json()),
+    ]);
+    currentConfig = cfg;
+    allProjects = projs.projects || [];
+    renderConfig(cfg);
+    renderStats(stats);
+    renderProjects();
+    renderEvents(events.events || []);
+  }
+
+  function renderConfig(cfg) {
+    $('#p_enabled').checked = !!cfg.privacy.enabled;
+    $('#p_strip').checked = !!cfg.privacy.strip_private_tags;
+    $('#p_strict').checked = !!cfg.privacy.strict_unclosed_tags;
+    $('#c_max').value = cfg.capture.max_content_chars ?? 0;
+    $('#c_auto').checked = !!cfg.capture.auto_extract_graph;
+    $('#c_lang').value = cfg.capture.default_language || 'auto';
+
+    // Patterns
+    const pats = cfg.privacy.patterns || {};
+    const host = $('#patterns');
+    host.innerHTML = '';
+    for (const [name, enabled] of Object.entries(pats)) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = PATTERN_LABELS[name] || name;
+      row.innerHTML = `
+        <label for="pat_${name}">${label}<span class="hint"><code>${name}</code></span></label>
+        <span class="switch"><input type="checkbox" id="pat_${name}" data-pat="${name}" ${enabled ? 'checked' : ''}/><span class="slider"></span></span>
+      `;
+      host.appendChild(row);
+    }
+  }
+
+  function renderStats(stats) {
+    if (stats.error) {
+      $('#stats').innerHTML = `<div style="color:var(--err)">Fehler: ${stats.error}</div>`;
+      return;
+    }
+    $('#s_mems').textContent = stats.total_memories ?? '?';
+    $('#s_chunks').textContent = stats.total_chunks ?? '?';
+    $('#s_projs').textContent = stats.projects ?? '?';
+    $('#s_embed').textContent = stats.embedding_provider ?? '?';
+    const g = stats.graph || {};
+    $('#s_ge').textContent = g.entities ?? '?';
+    $('#s_gr').textContent = g.relations ?? '?';
+    $('#s_path').textContent = stats.path ?? '?';
+  }
+
+  function renderProjects() {
+    // Blocklist chips
+    const blocked = (currentConfig.capture.blocked_projects || []);
+    const chipsHost = $('#blockchips');
+    chipsHost.innerHTML = blocked.length
+      ? ''
+      : '<span style="color:var(--muted)">Kein Projekt blockiert.</span>';
+    for (const p of blocked) {
+      const chip = document.createElement('span');
+      chip.className = 'project-chip';
+      chip.innerHTML = `${p} <button type="button" title="Entfernen" data-proj="${p}">×</button>`;
+      chipsHost.appendChild(chip);
+    }
+    // Project select
+    const sel = $('#projectSelect');
+    sel.innerHTML = '';
+    const unblocked = allProjects.filter(p => !blocked.includes(p));
+    if (unblocked.length === 0) {
+      sel.innerHTML = '<option value="">(keine)</option>';
+    } else {
+      for (const p of unblocked) {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        sel.appendChild(opt);
+      }
+    }
+  }
+
+  function renderEvents(events) {
+    const host = $('#events');
+    if (events.length === 0) {
+      host.innerHTML = '<div style="color:var(--muted)">Noch keine Events.</div>';
+      return;
+    }
+    host.innerHTML = '';
+    for (const ev of events) {
+      const div = document.createElement('div');
+      div.className = `ev ev-${ev.event}`;
+      const ts = (ev.ts || '').slice(11, 19);
+      const detail = Object.entries(ev)
+        .filter(([k]) => !['ts', 'event'].includes(k))
+        .map(([k,v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+        .join(' ');
+      div.innerHTML = `<span class="ts">${ts}</span><span class="ev-name">${ev.event}</span><span>${detail}</span>`;
+      host.appendChild(div);
+    }
+  }
+
+  function collectConfig() {
+    const patterns = {};
+    document.querySelectorAll('[data-pat]').forEach(el => {
+      patterns[el.dataset.pat] = el.checked;
+    });
+    return {
+      privacy: {
+        enabled: $('#p_enabled').checked,
+        strip_private_tags: $('#p_strip').checked,
+        strict_unclosed_tags: $('#p_strict').checked,
+        patterns,
+      },
+      capture: {
+        max_content_chars: parseInt($('#c_max').value, 10) || 0,
+        auto_extract_graph: $('#c_auto').checked,
+        default_language: $('#c_lang').value,
+        blocked_projects: currentConfig.capture.blocked_projects || [],
+      },
+    };
+  }
+
+  $('#save').addEventListener('click', async () => {
+    const body = collectConfig();
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { show('Speichern fehlgeschlagen', 'err'); return; }
+    currentConfig = await res.json();
+    renderConfig(currentConfig);
+    renderProjects();
+    show('Gespeichert ✓');
+  });
+
+  $('#reload').addEventListener('click', () => { load(); show('Neu geladen'); });
+
+  $('#blockAdd').addEventListener('click', () => {
+    const p = $('#projectSelect').value;
+    if (!p) return;
+    currentConfig.capture.blocked_projects = [...(currentConfig.capture.blocked_projects || []), p];
+    renderProjects();
+  });
+
+  $('#blockchips').addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON' && e.target.dataset.proj) {
+      currentConfig.capture.blocked_projects =
+        (currentConfig.capture.blocked_projects || []).filter(p => p !== e.target.dataset.proj);
+      renderProjects();
+    }
+  });
+
+  load();
+  // Poll recent events every 10s — lightweight
+  setInterval(async () => {
+    try {
+      const r = await fetch('/api/audit?n=30').then(r => r.json());
+      renderEvents(r.events || []);
+    } catch {}
+  }, 10000);
+</script>
+</body>
+</html>

@@ -162,6 +162,9 @@ def filter_content(
     *,
     strict_unclosed: bool = True,
     custom_patterns: list[SecretPattern] | None = None,
+    enabled: bool = True,
+    strip_private_tags: bool = True,
+    enabled_patterns: dict[str, bool] | None = None,
 ) -> FilterResult:
     """Sanitise content before persistence.
 
@@ -173,6 +176,13 @@ def filter_content(
         intended to wrap a secret but made a typo — better to refuse than
         to silently store it.
     custom_patterns : additional patterns to check (appended to built-ins).
+    enabled : master toggle. When False the function short-circuits and
+        returns the content unchanged (dashboard-driven).
+    strip_private_tags : when False, tier-1 <private>/<secret> stripping
+        is skipped. Unclosed-tag detection also skipped in that case.
+    enabled_patterns : optional `{pattern_name: bool}` map. Missing names
+        default to True (enabled). Disabling a name skips that built-in
+        pattern. `custom_patterns` are unaffected by this map.
 
     Returns
     -------
@@ -183,23 +193,35 @@ def filter_content(
 
     original_length = len(content)
 
+    # Master toggle — short-circuit, content passes through untouched.
+    if not enabled:
+        return FilterResult(
+            content=content,
+            original_length=original_length,
+            final_length=original_length,
+        )
+
     # ---- Tier 1: strip complete <private>...</private> and <secret>...</secret>
     private_count = 0
-    for m in _PRIVATE_TAG_RE.finditer(content):
-        private_count += 1
-        inner = m.group(0)
-        log.warning(
-            "Stripped <%s> block (fp=%s, len=%d)",
-            m.group(1).lower(), _fingerprint(inner), len(inner),
-        )
-    sanitised = _PRIVATE_TAG_RE.sub("", content)
+    sanitised = content
+    unclosed_found = False
+    if strip_private_tags:
+        for m in _PRIVATE_TAG_RE.finditer(content):
+            private_count += 1
+            inner = m.group(0)
+            log.warning(
+                "Stripped <%s> block (fp=%s, len=%d)",
+                m.group(1).lower(), _fingerprint(inner), len(inner),
+            )
+        sanitised = _PRIVATE_TAG_RE.sub("", content)
 
-    # ---- Check for UNCLOSED tags after stripping closed ones
-    unclosed_found = bool(_UNCLOSED_TAG_RE.search(sanitised))
+        # ---- Check for UNCLOSED tags after stripping closed ones
+        unclosed_found = bool(_UNCLOSED_TAG_RE.search(sanitised))
 
     # ---- Tier 2: pattern redaction
     redacted_patterns: list[str] = []
-    patterns = list(_PATTERNS)
+    _toggles = enabled_patterns or {}
+    patterns = [p for p in _PATTERNS if _toggles.get(p.name, True)]
     if custom_patterns:
         patterns.extend(custom_patterns)
 

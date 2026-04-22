@@ -188,12 +188,37 @@ The response always reports what was filtered (`🔒 title: patterns redacted: s
              └─────────────┘
 ```
 
+## Dashboard
+
+Optional local web UI for toggling capture and privacy behavior — runs as a
+separate process, hot-reloaded by the MCP server on each save.
+
+```bash
+python -m phase1.dashboard            # → http://127.0.0.1:7333
+# or, if installed as a script:
+granaria-dashboard
+```
+
+The dashboard lets you:
+
+- Toggle the privacy filter globally, per tier (tags vs patterns), per
+  credential pattern (AWS, Stripe, GitHub, …)
+- Set a max content length and a per-project blocklist (saves to blocked
+  projects are rejected)
+- Switch the knowledge-graph auto-extraction on/off as the default
+- Inspect live stats (memories, chunks, projects, graph) and recent
+  filter events
+
+State is stored in `~/.granaria.supermemory/config.json`; the event log
+lives at `~/.granaria.supermemory/dashboard_audit.jsonl`.
+
 ## Development
 
 Run the Phase 1 unit tests:
 
 ```bash
 python phase1/tests/test_phase1.py       # 34 tests: privacy filter, progressive recall, helpers
+python phase1/tests/test_dashboard.py    # 22 tests: config, policy, filter toggles
 ```
 
 ## License
