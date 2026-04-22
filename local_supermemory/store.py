@@ -36,7 +36,7 @@ CHUNK_ID_SEPARATOR = "#c"
 
 
 class MemoryStore:
-    def __init__(self, data_dir: str = "~/.local-supermemory"):
+    def __init__(self, data_dir: str = "~/.granaria.supermemory"):
         self.data_dir = Path(data_dir).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
 

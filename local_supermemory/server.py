@@ -1,11 +1,16 @@
 """Local Supermemory MCP Server v2 — mit Knowledge Graph + Ollama Embeddings"""
 import asyncio
+import json
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from .store import MemoryStore
 from .profile import get_engine
+
+# ── Phase 1: Privacy filter + progressive recall ────────────────
+from phase1.hooks.privacy_filter import filter_content
+from phase1.tools.recall_progressive import build_index, fetch_by_ids
 
 server = Server("local-supermemory")
 store = MemoryStore()
@@ -136,6 +141,53 @@ async def list_tools() -> list[Tool]:
             }
         ),
 
+        # ── Progressive Disclosure (Phase 1) ─────────────────
+        Tool(
+            name="recall_index",
+            description=(
+                "Progressive Recall Layer 1: liefert einen schlanken Index "
+                "passender Memories (memory_id, title, mem_type, created_at, "
+                "score, project) — ~500 Tokens statt ~8000. "
+                "Danach gezielt recall_by_ids(ids=[...]) aufrufen, nur für "
+                "die Memories, deren Volltext du wirklich brauchst."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "maxLength": 1000},
+                    "n_results": {"type": "integer", "default": 15,
+                                  "minimum": 1, "maximum": 50},
+                    "project": {"type": "string", "maxLength": 128,
+                                "description": "Pflicht wenn Memories in "
+                                               "einem bestimmten Projekt "
+                                               "liegen; default='default'"},
+                    "mem_type": {"type": "string",
+                                 "description": "Optional: Typ-Filter"}
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="recall_by_ids",
+            description=(
+                "Progressive Recall Layer 2: lädt den Volltext für "
+                "spezifische memory_ids (aus recall_index). Max 20 IDs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 20
+                    },
+                    "project": {"type": "string", "maxLength": 128,
+                                "description": "default='default'"}
+                },
+                "required": ["ids"]
+            }
+        ),
+
         # ── Knowledge Graph Tools (v2) ───────────────────────
         Tool(
             name="graph_add_entity",
@@ -226,11 +278,43 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
         if not content:
             return [TextContent(type="text", text="Fehler: content erforderlich")]
         if action == "save":
+            # Phase 1: Privacy-Filter auf content + metadata-Felder.
+            # User könnte sonst Credentials via title/description/source_url
+            # in Metadata einschleusen (die ungefiltert nach Chroma gehen).
+            _fields = {
+                "content": content,
+                "title": args.get("title") or "",
+                "description": args.get("description") or "",
+                "source_url": args.get("source_url") or "",
+            }
+            _filtered = {k: filter_content(v) for k, v in _fields.items()}
+
+            # Jede rejection bricht den save (unclosed tag irgendwo im payload)
+            for fname, fres in _filtered.items():
+                if fres.rejected:
+                    return [TextContent(type="text",
+                        text=f"⚠️ [{fname}] {fres.rejection_reason}")]
+
+            # Summaries sammeln für das Privacy-Badge in der Response
+            _summary_bits = [
+                f"{fname}: {fres.summary()}"
+                for fname, fres in _filtered.items()
+                if fres.had_secrets
+            ]
+            privacy_summary = (
+                f" · 🔒 " + "; ".join(_summary_bits) if _summary_bits else ""
+            )
+
+            content = _filtered["content"].content
+            title = _filtered["title"].content or None
+            description = _filtered["description"].content or None
+            source_url = _filtered["source_url"].content or None
+
             r = store.save(
                 content, project,
-                title=args.get("title"),
-                source_url=args.get("source_url"),
-                description=args.get("description"),
+                title=title,
+                source_url=source_url,
+                description=description,
                 language=args.get("language", "auto"),
             )
             if r.get("error"):
@@ -243,7 +327,7 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
                     graph_info = f", {g.get('entities', 0)} Entitäten, {g.get('relations', 0)} Relationen"
             return [TextContent(
                 type="text",
-                text=f"✅ Gespeichert (ID: {r['id']}, Projekt: {r['project']}{chunks_info}{graph_info})"
+                text=f"✅ Gespeichert (ID: {r['id']}, Projekt: {r['project']}{chunks_info}{graph_info}){privacy_summary}"
             )]
         else:
             r = store.forget(content, project)
@@ -315,7 +399,7 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
     elif name == "stats":
         s = store.stats()
         text = f"""## Statistiken
-**Gesamt:** {s['total']} Memories in {s['projects']} Projekten
+**Gesamt:** {s['total_memories']} Memories ({s['total_chunks']} Chunks) in {s['projects']} Projekten
 **Speicher:** `{s['path']}`
 **Embeddings:** {s['embedding_provider']}
 **Knowledge Graph:** {s['graph']['entities']} Entitäten, {s['graph']['relations']} Relationen, {s['graph']['memory_links']} Memory-Links
@@ -437,6 +521,73 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
 
         parts.append(f"\n_Provider: {rag_result.get('provider', '?')}_")
         return [TextContent(type="text", text="\n".join(parts))]
+
+    # ── Progressive Disclosure (Phase 1) ─────────────────────
+    elif name == "recall_index":
+        query = args.get("query", "")
+        project = args.get("project") or "default"
+        n = args.get("n_results", 15)
+        mem_type = args.get("mem_type")
+        if not query:
+            return [TextContent(type="text", text="Fehler: query erforderlich")]
+
+        coll = store._get_collection(project)
+        # embedder=None → Collection embedded via registrierter Ollama-EF
+        # (oder Chroma-Default-EF, falls Ollama nicht aktiv).
+        # project-Filter entfällt: eine Collection pro Projekt.
+        hits = build_index(
+            collection=coll,
+            query=query,
+            embedder=None,
+            n_results=n,
+            project=None,
+            mem_type=mem_type,
+        )
+        payload = {
+            "count": len(hits),
+            "query": query,
+            "project": project,
+            "mem_type_filter": mem_type,
+            "hits": [h.as_dict() for h in hits],
+            "_next_step": (
+                "Call recall_by_ids(ids=[...]) with the memory_ids you want "
+                "full details for. Usually 2–5 IDs are enough."
+            ),
+        }
+        return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))]
+
+    elif name == "recall_by_ids":
+        ids = args.get("ids") or []
+        project = args.get("project") or "default"
+        if not ids:
+            return [TextContent(type="text", text="Fehler: ids erforderlich")]
+        if len(ids) > 20:
+            ids = ids[:20]
+
+        coll = store._get_collection(project)
+
+        # SQLite holds the unsplit Volltext per memory_id — use it to avoid
+        # lossy chunk-reconstruction from Chroma. One prepared statement,
+        # then the loader is called once per requested id.
+        import sqlite3 as _sqlite3
+        _conn = _sqlite3.connect(store.db_path)
+        _rows = _conn.execute(
+            f"SELECT id, content FROM memories WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        ).fetchall()
+        _conn.close()
+        _content_map = {row[0]: row[1] for row in _rows}
+
+        full = fetch_by_ids(
+            coll, ids, project=None,
+            content_loader=lambda mid: _content_map.get(mid),
+        )
+        payload = {
+            "count": len(full),
+            "requested": len(ids),
+            "memories": [m.as_dict() for m in full],
+        }
+        return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))]
 
     # ── Knowledge Graph Tools ────────────────────────────────
     elif name == "graph_add_entity":

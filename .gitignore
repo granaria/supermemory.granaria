@@ -45,6 +45,12 @@ migrate.py
 .AppleDouble
 .LSOverride
 
+# Claude Code worktree metadata
+.claude/
+
+# Phase 1 local backups (never commit)
+.phase1_backups/
+
 # Testing
 .pytest_cache/
 .coverage
